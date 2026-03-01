@@ -94,6 +94,44 @@ GITBRANCH=master
 CONF
 sudo chmod 644 "$MOUNT_DIR/boot/dietpi-bootstrap.conf"
 
+# 6. SmartPad-specific: inject rotation configs
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+if [[ "$BOARD" == "smartpad" ]]; then
+    echo "Installing SmartPad rotation configs..."
+
+    # Console rotation (fbcon)
+    BOOTCFG="$MOUNT_DIR/boot/armbianEnv.txt"
+    if [[ -f "$BOOTCFG" ]]; then
+        echo "extraargs=fbcon=rotate:2" | sudo tee -a "$BOOTCFG" > /dev/null
+        echo "  Console rotation added to armbianEnv.txt"
+    fi
+
+    # X11 rotation configs
+    sudo mkdir -p "$MOUNT_DIR/etc/X11/xorg.conf.d"
+    for conf in "$REPO_DIR/overlay/smartpad/"*.conf; do
+        sudo cp -v "$conf" "$MOUNT_DIR/etc/X11/xorg.conf.d/"
+    done
+
+    # Rotation script
+    sudo cp -v "$REPO_DIR/overlay/smartpad/smartpad-rotate.sh" \
+        "$MOUNT_DIR/usr/local/bin/smartpad-rotate.sh"
+    sudo chmod 755 "$MOUNT_DIR/usr/local/bin/smartpad-rotate.sh"
+
+    # Autostart for desktop sessions
+    sudo mkdir -p "$MOUNT_DIR/etc/xdg/autostart"
+    sudo cp -v "$REPO_DIR/overlay/smartpad/smartpad-rotate.desktop" \
+        "$MOUNT_DIR/etc/xdg/autostart/"
+
+    # LightDM rotation (if desktop is installed later)
+    sudo mkdir -p "$MOUNT_DIR/etc/lightdm/lightdm.conf.d"
+    sudo tee "$MOUNT_DIR/etc/lightdm/lightdm.conf.d/50-smartpad-rotate.conf" > /dev/null << 'LIGHTDM'
+[Seat:*]
+display-setup-script=/usr/local/bin/smartpad-rotate.sh
+LIGHTDM
+
+    echo "  SmartPad rotation configs installed"
+fi
+
 # Unmount
 echo "Unmounting..."
 sudo umount "$MOUNT_DIR/boot" 2>/dev/null || true
