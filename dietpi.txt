@@ -1,0 +1,37 @@
+# YUMI DietPi Configuration Template
+# This file is injected into /boot/dietpi.txt after DietPi installer runs.
+# See https://dietpi.com/docs/usage/#dietpitxt for all options.
+
+# Automated first-run setup
+AUTO_SETUP_AUTOMATED=1
+AUTO_SETUP_ACCEPT_LICENSE=1
+
+# Locale and timezone
+AUTO_SETUP_LOCALE=C.UTF-8
+AUTO_SETUP_KEYBOARD_LAYOUT=us
+AUTO_SETUP_TIMEZONE=Europe/Paris
+
+# Network
+AUTO_SETUP_NET_ETHERNET_ENABLED=1
+AUTO_SETUP_NET_WIFI_ENABLED=1
+AUTO_SETUP_NET_WIFI_COUNTRY_CODE=FR
+AUTO_SETUP_NET_HOSTNAME=smartpi
+
+# SSH
+AUTO_SETUP_SSH_SERVER_INDEX=-2
+
+# Global password (used for root and dietpi users)
+AUTO_SETUP_GLOBAL_PASSWORD=yumi
+
+# Software to install
+# -2 = OpenSSH Server
+AUTO_SETUP_INSTALL_SOFTWARE_ID=-2
+
+# Logging
+AUTO_SETUP_LOGGING_INDEX=-1
+
+# Serial console
+AUTO_SETUP_HEADLESS=0
+
+# Survey opt-out
+SURVEY_OPTED_IN=0

@@ -1,0 +1,147 @@
+name: Build DietPi Images (First-Boot)
+
+on:
+  workflow_dispatch:
+    inputs:
+      armbian_release:
+        description: 'Armbian release tag (leave empty for latest)'
+        required: false
+        default: ''
+  # schedule:
+  #   - cron: '0 3 * * 0'  # Weekly on Sunday at 3am
+
+jobs:
+  matrix:
+    name: Prepare Build Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      configs: ${{ steps.set-matrix.outputs.configs }}
+      armbian_tag: ${{ steps.get-release.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get Armbian release tag
+        id: get-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [[ -n "${{ github.event.inputs.armbian_release }}" ]]; then
+            TAG="${{ github.event.inputs.armbian_release }}"
+          else
+            TAG=$(gh release view --repo Yumi-Lab/SmartPi-armbian --json tagName -q '.tagName')
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Using Armbian release: $TAG"
+
+      - name: Build config matrix
+        id: set-matrix
+        run: |
+          CONFIGS='['
+          FIRST=true
+          for conf in configs/*.conf; do
+            source "$conf"
+            NAME=$(basename "$conf" .conf)
+            if [ "$FIRST" = true ]; then
+              FIRST=false
+            else
+              CONFIGS+=','
+            fi
+            CONFIGS+="{\"name\":\"$NAME\",\"board\":\"$BOARD\",\"release\":\"$RELEASE\",\"debian_version\":\"$DEBIAN_VERSION\",\"distro_target\":\"$DISTRO_TARGET\",\"hw_model\":\"$HW_MODEL\",\"wifi_required\":\"$WIFI_REQUIRED\"}"
+          done
+          CONFIGS+=']'
+          echo "configs=$CONFIGS" >> $GITHUB_OUTPUT
+          echo "Matrix: $CONFIGS"
+
+  build:
+    name: Build ${{ matrix.config.name }}
+    needs: matrix
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        config: ${{ fromJson(needs.matrix.outputs.configs) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Find Armbian image asset
+        id: find-asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ needs.matrix.outputs.armbian_tag }}"
+          BOARD="${{ matrix.config.board }}"
+          RELEASE="${{ matrix.config.release }}"
+
+          echo "Looking for Armbian image: board=$BOARD release=$RELEASE tag=$TAG"
+
+          # List all assets and find the matching server image
+          ASSET=$(gh release view "$TAG" --repo Yumi-Lab/SmartPi-armbian --json assets -q \
+            ".assets[].name" | grep -i "$BOARD" | grep -i "$RELEASE" | grep -i "server" | grep -E '\.(img\.xz|img\.gz)$' | head -1)
+
+          if [[ -z "$ASSET" ]]; then
+            echo "ERROR: No matching Armbian image found for $BOARD $RELEASE"
+            echo "Available assets:"
+            gh release view "$TAG" --repo Yumi-Lab/SmartPi-armbian --json assets -q '.assets[].name'
+            exit 1
+          fi
+
+          echo "Found asset: $ASSET"
+          echo "asset_name=$ASSET" >> $GITHUB_OUTPUT
+
+      - name: Download Armbian image
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ needs.matrix.outputs.armbian_tag }}"
+          ASSET="${{ steps.find-asset.outputs.asset_name }}"
+          echo "Downloading $ASSET from release $TAG..."
+          gh release download "$TAG" --repo Yumi-Lab/SmartPi-armbian --pattern "$ASSET" --output "armbian.img.xz"
+
+      - name: Decompress image
+        run: |
+          echo "Decompressing image..."
+          if [[ "${{ steps.find-asset.outputs.asset_name }}" == *.img.xz ]]; then
+            xz -d armbian.img.xz
+          elif [[ "${{ steps.find-asset.outputs.asset_name }}" == *.img.gz ]]; then
+            gunzip armbian.img.gz
+          fi
+          ls -lh armbian.img
+
+      - name: Inject first-boot files
+        run: |
+          echo "Injecting DietPi first-boot into image..."
+          sudo bash scripts/inject-firstboot.sh \
+            armbian.img \
+            "${{ matrix.config.board }}" \
+            "${{ matrix.config.distro_target }}"
+
+      - name: Generate output image name
+        id: image-name
+        run: |
+          DATE=$(date +%Y-%m-%d-%H%M)
+          NAME="Yumi-${{ matrix.config.board }}-DietPi-${{ matrix.config.release }}-${{ matrix.config.debian_version }}-server-${DATE}"
+          echo "image_name=$NAME" >> $GITHUB_OUTPUT
+          echo "Output image: $NAME"
+          mv armbian.img "${NAME}.img"
+
+      - name: Compress image
+        run: |
+          NAME="${{ steps.image-name.outputs.image_name }}"
+          echo "Compressing ${NAME}.img..."
+          xz -T0 -6 "${NAME}.img"
+          ls -lh "${NAME}.img.xz"
+
+      - name: Generate checksum
+        run: |
+          NAME="${{ steps.image-name.outputs.image_name }}"
+          sha256sum "${NAME}.img.xz" > "${NAME}.img.xz.sha256"
+          cat "${NAME}.img.xz.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.image-name.outputs.image_name }}
+          path: |
+            ${{ steps.image-name.outputs.image_name }}.img.xz
+            ${{ steps.image-name.outputs.image_name }}.img.xz.sha256
+          retention-days: 30
