@@ -132,6 +132,13 @@ jobs:
             "${{ matrix.config.distro_target }}" \
             --mode "${{ matrix.config.flavor }}"
 
+      - name: Verify injected files
+        run: |
+          sudo bash scripts/verify-image.sh \
+            armbian.img \
+            "${{ matrix.config.flavor }}" \
+            "${{ matrix.config.board }}"
+
       - name: Name + compress + checksum
         id: image-name
         run: |
