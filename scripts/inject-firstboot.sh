@@ -8,11 +8,13 @@ BOARD="$2"
 DISTRO_TARGET="$3"
 MODE="dietpi"
 
-# Parse --mode flag
-for arg in "$@"; do
-    case "$arg" in
-        --mode=*) MODE="${arg#--mode=}" ;;
-        --mode) shift; MODE="$1" ;;
+# Parse remaining args for --mode flag
+shift 3 || true
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --mode=*) MODE="${1#--mode=}"; shift ;;
+        --mode)   MODE="$2"; shift 2 ;;
+        *)        shift ;;
     esac
 done
 
