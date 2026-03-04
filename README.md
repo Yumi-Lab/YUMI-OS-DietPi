@@ -1,83 +1,169 @@
 # YUMI-OS-DietPi
 
-DietPi image builder for Yumi SmartPi devices (SmartPi One & SmartPad). Downloads official Armbian server images from [SmartPi-armbian](https://github.com/Yumi-Lab/SmartPi-armbian) releases and converts them to DietPi.
+Image builder for Yumi SmartPi devices (SmartPi One & SmartPad). Produces two types of images from official [SmartPi-armbian](https://github.com/Yumi-Lab/SmartPi-armbian) server releases.
 
-## How it works
+## Two flavors
 
-This project uses a **first-boot conversion** approach:
+| | **YumiSlim** | **YumiDietPi** |
+|---|---|---|
+| First boot | ~5 min | ~30-45 min |
+| Network on first boot | apt update only | Required (downloads DietPi installer) |
+| Base system | Armbian + optimizations | Armbian → converted to DietPi |
+| WiFi management | `armbian-config` (nmcli) | `dietpi-config` (wpa_supplicant) |
+| CPU governor | `armbian-config` + sysctl | `dietpi-set_cpu` |
+| DietPi tools | No | Yes (`dietpi-software`, etc.) |
+| Approx. image size | ~400 MB | ~300 MB |
+| Stability | High (minimal changes) | Medium (full OS conversion) |
+| Use case | Yumi custom stack | Full DietPi ecosystem |
 
-1. The CI downloads Armbian server images from the latest SmartPi-armbian release
-2. A bootstrap script and systemd service are injected into the image
-3. On first boot, the device downloads and runs the official [DietPi installer](https://github.com/MichaIng/DietPi)
-4. After conversion and reboot, DietPi is ready to use
+**Recommendation:** Start with YumiSlim. Use YumiDietPi only if you need `dietpi-software` or other DietPi-specific tools.
 
-**Requirements:** The device needs internet access on first boot for the DietPi conversion (~20-30 min).
+---
 
-## Supported boards
+## YumiSlim — How it works
 
-| Board | Debian | DietPi distro_target | Image |
-|-------|--------|---------------------|-------|
-| SmartPi One | Bookworm (12) | 7 | `Yumi-smartpi1-DietPi-bookworm-debian12-server` |
-| SmartPi One | Trixie (13) | 8 | `Yumi-smartpi1-DietPi-trixie-debian13-server` |
-| SmartPad | Bookworm (12) | 7 | `Yumi-smartpad-DietPi-bookworm-debian12-server` |
-| SmartPad | Trixie (13) | 8 | `Yumi-smartpad-DietPi-trixie-debian13-server` |
+1. CI downloads an Armbian server image from the latest SmartPi-armbian release
+2. **Build time** — the following are injected into the image:
+   - `yumislim-bootstrap.sh` + systemd service
+   - APT config: no recommends, no suggests, no language packs
+   - sysctl: `vm.swappiness=1`, quiet kernel logging
+   - Systemd masks for `apt-daily` timers
+   - SmartPad rotation configs (SmartPad only)
+3. **First boot** (~5 min):
+   - `apt-get update` + install essentials (curl, nano, htop, cron...)
+   - Remove bloat: `/usr/share/doc`, `/usr/share/man`, `/usr/share/fonts`
+   - Set CPU governor to `schedutil`
+   - Configure hostname, timezone, locale
+   - `armbian-config` available for WiFi and CPU tuning
+   - Reboot
+
+---
+
+## YumiDietPi — How it works
+
+1. CI downloads an Armbian server image
+2. **Build time** — injected: `dietpi-bootstrap.sh` + service + `dietpi.txt` automation
+3. **First boot** (~30-45 min):
+   - Downloads the official [DietPi installer](https://github.com/MichaIng/DietPi)
+   - Runs full Armbian → DietPi conversion
+   - Applies `dietpi.txt` automation (hostname, locale, timezone, SSH, password)
+   - Reboot into DietPi
+
+---
+
+## Supported boards & images
+
+### YumiSlim
+
+| Board | Debian | Image name |
+|-------|--------|------------|
+| SmartPi One | Bookworm (12) | `Yumi-smartpi1-Slim-bookworm-debian12-server` |
+| SmartPi One | Trixie (13) | `Yumi-smartpi1-Slim-trixie-debian13-server` |
+| SmartPad | Bookworm (12) | `Yumi-smartpad-Slim-bookworm-debian12-server` |
+| SmartPad | Trixie (13) | `Yumi-smartpad-Slim-trixie-debian13-server` |
+
+### YumiDietPi
+
+| Board | Debian | Image name |
+|-------|--------|------------|
+| SmartPi One | Bookworm (12) | `Yumi-smartpi1-DietPi-bookworm-debian12-server` |
+| SmartPi One | Trixie (13) | `Yumi-smartpi1-DietPi-trixie-debian13-server` |
+| SmartPad | Bookworm (12) | `Yumi-smartpad-DietPi-bookworm-debian12-server` |
+| SmartPad | Trixie (13) | `Yumi-smartpad-DietPi-trixie-debian13-server` |
+
+---
 
 ## Default credentials
 
-- **User:** `pi` / **Password:** `yumi`
-- **Root password:** `yumi` (via DietPi automation)
+| | YumiSlim | YumiDietPi |
+|---|---|---|
+| User | `pi` | `pi` + `dietpi` (DietPi native) |
+| Password | `yumi` | `yumi` |
+| Root password | `yumi` | `yumi` |
+| sudo | mot de passe requis | mot de passe requis |
+| Hostname | `smartpi` / `smartpad` | `smartpi` / `smartpad` |
+
+> The Armbian default interactive first-run prompt is disabled — the device boots directly without requiring any keyboard interaction.
+
+---
 
 ## Project structure
 
 ```
 YUMI-OS-DietPi/
 ├── .github/workflows/
-│   └── build-firstboot.yml     # CI workflow
+│   ├── BuildImages.yml             # Test builds (push develop / PR / manuel)
+│   └── Release.yml                 # GitHub Release publique (manuel + version)
+├── src/
+│   └── version                     # Version courante
 ├── configs/
-│   ├── smartpi1-bookworm.conf   # SmartPi One + Debian 12
-│   ├── smartpi1-trixie.conf     # SmartPi One + Debian 13
-│   ├── smartpad-bookworm.conf   # SmartPad + Debian 12
-│   └── smartpad-trixie.conf     # SmartPad + Debian 13
+│   ├── smartpi1-bookworm.conf
+│   ├── smartpi1-trixie.conf
+│   ├── smartpad-bookworm.conf
+│   └── smartpad-trixie.conf
+├── overlay/
+│   ├── common/
+│   │   └── etc/
+│   │       ├── apt/apt.conf.d/97yumi   # APT: no recommends/suggests
+│   │       └── sysctl.d/97-yumi.conf   # sysctl tuning
+│   └── smartpad/                        # SmartPad rotation configs
 ├── scripts/
-│   ├── dietpi-bootstrap.sh      # First-boot conversion script
-│   └── inject-firstboot.sh      # Image injection script (CI)
-├── dietpi.txt                   # DietPi config template
+│   ├── inject-firstboot.sh              # Image injection (supports --mode slim|dietpi)
+│   ├── yumislim-bootstrap.sh            # YumiSlim first-boot script
+│   └── dietpi-bootstrap.sh              # YumiDietPi first-boot script
+├── dietpi.txt                            # DietPi automation template
 ├── LICENSE
 └── README.md
 ```
 
-## Usage
+---
 
-### Build images via GitHub Actions
+## Build via GitHub Actions
 
-1. Go to **Actions** > **Build DietPi Images (First-Boot)**
-2. Click **Run workflow**
-3. Optionally specify an Armbian release tag (defaults to latest)
-4. Download the built images from the workflow artifacts
+### Test build (artifacts 30 jours)
+**Actions** > **Build Images (Test)** > **Run workflow**
+- Choisir flavor : `slim`, `dietpi`, ou `all`
+- Se déclenche aussi automatiquement sur push `develop` et PR
 
-### Manual build (local)
+### Release publique (GitHub Release permanente)
+**Actions** > **Release** > **Run workflow**
+- Entrer la version : ex `1.0.0`
+- Choisir flavor : `slim`, `dietpi`, ou `all`
+- Crée un GitHub Release avec toutes les images + sha256
+- Requiert le secret `PAT` (token avec scopes `repo` + `workflow`)
+
+---
+
+## Manual build (local)
 
 ```bash
-# Download an Armbian server image
-wget https://github.com/Yumi-Lab/SmartPi-armbian/releases/latest/download/Yumi-smartpi1-bookworm-debian12-server.img.xz
-xz -d Yumi-smartpi1-bookworm-debian12-server.img.xz
+# Download and decompress an Armbian image
+wget https://github.com/Yumi-Lab/SmartPi-armbian/releases/latest/download/Yumi-smartpi1-bookworm-server.img.xz
+xz -d Yumi-smartpi1-bookworm-server.img.xz
 
-# Inject first-boot files
-sudo ./scripts/inject-firstboot.sh Yumi-smartpi1-bookworm-debian12-server.img smartpi1 7
+# YumiSlim
+sudo ./scripts/inject-firstboot.sh Yumi-smartpi1-bookworm-server.img smartpi1 7 --mode slim
 
-# Flash to SD card
-sudo dd if=Yumi-smartpi1-bookworm-debian12-server.img of=/dev/sdX bs=4M status=progress
+# YumiDietPi
+sudo ./scripts/inject-firstboot.sh Yumi-smartpi1-bookworm-server.img smartpi1 7 --mode dietpi
+
+# Flash
+sudo dd if=Yumi-smartpi1-bookworm-server.img of=/dev/sdX bs=4M status=progress
 ```
 
-### First boot
+---
 
-1. Flash the image to an SD card
-2. Connect the device to the network (Ethernet or pre-configured WiFi)
-3. Power on — the DietPi conversion starts automatically
-4. Wait ~20-30 minutes for the conversion to complete
-5. The device reboots into DietPi
+## Monitor first boot
 
-Monitor progress: `journalctl -u dietpi-bootstrap -f`
+```bash
+# YumiSlim
+journalctl -u yumislim-bootstrap -f
+
+# YumiDietPi
+journalctl -u dietpi-bootstrap -f
+```
+
+---
 
 ## License
 

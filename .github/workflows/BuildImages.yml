@@ -1,14 +1,25 @@
-name: Build DietPi Images (First-Boot)
+name: Build Images (Test)
 
 on:
+  push:
+    branches:
+      - develop
+  pull_request:
   workflow_dispatch:
     inputs:
+      flavor:
+        description: 'Flavor to build'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - slim
+          - dietpi
       armbian_release:
         description: 'Armbian release tag (leave empty for latest)'
         required: false
         default: ''
-  # schedule:
-  #   - cron: '0 3 * * 0'  # Weekly on Sunday at 3am
 
 jobs:
   matrix:
@@ -36,24 +47,37 @@ jobs:
       - name: Build config matrix
         id: set-matrix
         run: |
+          FLAVOR="${{ github.event.inputs.flavor }}"
+          # On push/PR, build all flavors
+          if [[ -z "$FLAVOR" ]]; then FLAVOR="all"; fi
+
           CONFIGS='['
           FIRST=true
+
+          add_config() {
+            local name="$1" board="$2" release="$3" debian_version="$4"
+            local distro_target="$5" hw_model="$6" wifi_required="$7" flavor="$8"
+            if [ "$FIRST" = true ]; then FIRST=false; else CONFIGS+=','; fi
+            CONFIGS+="{\"name\":\"$name\",\"board\":\"$board\",\"release\":\"$release\",\"debian_version\":\"$debian_version\",\"distro_target\":\"$distro_target\",\"hw_model\":\"$hw_model\",\"wifi_required\":\"$wifi_required\",\"flavor\":\"$flavor\"}"
+          }
+
           for conf in configs/*.conf; do
             source "$conf"
             NAME=$(basename "$conf" .conf)
-            if [ "$FIRST" = true ]; then
-              FIRST=false
-            else
-              CONFIGS+=','
+            if [[ "$FLAVOR" == "all" || "$FLAVOR" == "slim" ]]; then
+              add_config "$NAME" "$BOARD" "$RELEASE" "$DEBIAN_VERSION" "$DISTRO_TARGET" "$HW_MODEL" "$WIFI_REQUIRED" "slim"
             fi
-            CONFIGS+="{\"name\":\"$NAME\",\"board\":\"$BOARD\",\"release\":\"$RELEASE\",\"debian_version\":\"$DEBIAN_VERSION\",\"distro_target\":\"$DISTRO_TARGET\",\"hw_model\":\"$HW_MODEL\",\"wifi_required\":\"$WIFI_REQUIRED\"}"
+            if [[ "$FLAVOR" == "all" || "$FLAVOR" == "dietpi" ]]; then
+              add_config "$NAME" "$BOARD" "$RELEASE" "$DEBIAN_VERSION" "$DISTRO_TARGET" "$HW_MODEL" "$WIFI_REQUIRED" "dietpi"
+            fi
           done
+
           CONFIGS+=']'
           echo "configs=$CONFIGS" >> $GITHUB_OUTPUT
           echo "Matrix: $CONFIGS"
 
   build:
-    name: Build ${{ matrix.config.name }}
+    name: ${{ matrix.config.flavor }} — ${{ matrix.config.name }}
     needs: matrix
     runs-on: ubuntu-latest
     strategy:
@@ -72,70 +96,60 @@ jobs:
           BOARD="${{ matrix.config.board }}"
           RELEASE="${{ matrix.config.release }}"
 
-          echo "Looking for Armbian image: board=$BOARD release=$RELEASE tag=$TAG"
-
-          # List all assets and find the matching server image
           ASSET=$(gh release view "$TAG" --repo Yumi-Lab/SmartPi-armbian --json assets -q \
             ".assets[].name" | grep -i "$BOARD" | grep -i "$RELEASE" | grep -i "server" | grep -E '\.(img\.xz|img\.gz)$' | head -1)
 
           if [[ -z "$ASSET" ]]; then
             echo "ERROR: No matching Armbian image found for $BOARD $RELEASE"
-            echo "Available assets:"
             gh release view "$TAG" --repo Yumi-Lab/SmartPi-armbian --json assets -q '.assets[].name'
             exit 1
           fi
 
-          echo "Found asset: $ASSET"
           echo "asset_name=$ASSET" >> $GITHUB_OUTPUT
 
       - name: Download Armbian image
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${{ needs.matrix.outputs.armbian_tag }}"
-          ASSET="${{ steps.find-asset.outputs.asset_name }}"
-          echo "Downloading $ASSET from release $TAG..."
-          gh release download "$TAG" --repo Yumi-Lab/SmartPi-armbian --pattern "$ASSET" --output "armbian.img.xz"
+          gh release download "${{ needs.matrix.outputs.armbian_tag }}" \
+            --repo Yumi-Lab/SmartPi-armbian \
+            --pattern "${{ steps.find-asset.outputs.asset_name }}" \
+            --output "armbian.img.xz"
 
       - name: Decompress image
         run: |
-          echo "Decompressing image..."
           if [[ "${{ steps.find-asset.outputs.asset_name }}" == *.img.xz ]]; then
             xz -d armbian.img.xz
-          elif [[ "${{ steps.find-asset.outputs.asset_name }}" == *.img.gz ]]; then
+          else
             gunzip armbian.img.gz
           fi
-          ls -lh armbian.img
 
       - name: Inject first-boot files
         run: |
-          echo "Injecting DietPi first-boot into image..."
           sudo bash scripts/inject-firstboot.sh \
             armbian.img \
             "${{ matrix.config.board }}" \
-            "${{ matrix.config.distro_target }}"
+            "${{ matrix.config.distro_target }}" \
+            --mode "${{ matrix.config.flavor }}"
 
-      - name: Generate output image name
+      - name: Name + compress + checksum
         id: image-name
         run: |
           DATE=$(date +%Y-%m-%d-%H%M)
-          NAME="Yumi-${{ matrix.config.board }}-DietPi-${{ matrix.config.release }}-${{ matrix.config.debian_version }}-server-${DATE}"
+          FLAVOR="${{ matrix.config.flavor }}"
+          BOARD="${{ matrix.config.board }}"
+          RELEASE="${{ matrix.config.release }}"
+          DEBIAN="${{ matrix.config.debian_version }}"
+
+          if [[ "$FLAVOR" == "slim" ]]; then LABEL="Slim"; else LABEL="DietPi"; fi
+
+          NAME="Yumi-${BOARD}-${LABEL}-${RELEASE}-${DEBIAN}-server-${DATE}"
           echo "image_name=$NAME" >> $GITHUB_OUTPUT
-          echo "Output image: $NAME"
+
           mv armbian.img "${NAME}.img"
-
-      - name: Compress image
-        run: |
-          NAME="${{ steps.image-name.outputs.image_name }}"
-          echo "Compressing ${NAME}.img..."
           xz -T0 -6 "${NAME}.img"
-          ls -lh "${NAME}.img.xz"
-
-      - name: Generate checksum
-        run: |
-          NAME="${{ steps.image-name.outputs.image_name }}"
           sha256sum "${NAME}.img.xz" > "${NAME}.img.xz.sha256"
-          cat "${NAME}.img.xz.sha256"
+          ls -lh "${NAME}.img.xz"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

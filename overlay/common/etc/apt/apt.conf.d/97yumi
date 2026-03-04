@@ -1,0 +1,5 @@
+// YUMI APT Configuration — lightweight, no bloat
+APT::Install-Recommends "false";
+APT::Install-Suggests "false";
+Acquire::Languages "none";
+DPkg::options "--force-confdef,--force-confold";

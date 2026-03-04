@@ -1,0 +1,257 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version (ex: 1.0.0)'
+        required: true
+      flavor:
+        description: 'Flavor to release'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - slim
+          - dietpi
+      armbian_release:
+        description: 'Armbian release tag (leave empty for latest)'
+        required: false
+        default: ''
+
+jobs:
+  # ─── Job 1 : Bump version ─────────────────────────────────────────────────────
+  bump-version:
+    name: Bump version to ${{ github.event.inputs.version }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PAT }}
+
+      - name: Update src/version
+        run: |
+          echo "${{ github.event.inputs.version }}" > src/version
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add src/version
+          git commit -m "release: v${{ github.event.inputs.version }}"
+          git push
+
+  # ─── Job 2 : Build matrix ─────────────────────────────────────────────────────
+  matrix:
+    name: Prepare Build Matrix
+    runs-on: ubuntu-latest
+    needs: bump-version
+    outputs:
+      configs: ${{ steps.set-matrix.outputs.configs }}
+      armbian_tag: ${{ steps.get-release.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Get Armbian release tag
+        id: get-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [[ -n "${{ github.event.inputs.armbian_release }}" ]]; then
+            TAG="${{ github.event.inputs.armbian_release }}"
+          else
+            TAG=$(gh release view --repo Yumi-Lab/SmartPi-armbian --json tagName -q '.tagName')
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Using Armbian release: $TAG"
+
+      - name: Build config matrix
+        id: set-matrix
+        run: |
+          FLAVOR="${{ github.event.inputs.flavor }}"
+          CONFIGS='['
+          FIRST=true
+
+          add_config() {
+            local name="$1" board="$2" release="$3" debian_version="$4"
+            local distro_target="$5" hw_model="$6" wifi_required="$7" flavor="$8"
+            if [ "$FIRST" = true ]; then FIRST=false; else CONFIGS+=','; fi
+            CONFIGS+="{\"name\":\"$name\",\"board\":\"$board\",\"release\":\"$release\",\"debian_version\":\"$debian_version\",\"distro_target\":\"$distro_target\",\"hw_model\":\"$hw_model\",\"wifi_required\":\"$wifi_required\",\"flavor\":\"$flavor\"}"
+          }
+
+          for conf in configs/*.conf; do
+            source "$conf"
+            NAME=$(basename "$conf" .conf)
+            if [[ "$FLAVOR" == "all" || "$FLAVOR" == "slim" ]]; then
+              add_config "$NAME" "$BOARD" "$RELEASE" "$DEBIAN_VERSION" "$DISTRO_TARGET" "$HW_MODEL" "$WIFI_REQUIRED" "slim"
+            fi
+            if [[ "$FLAVOR" == "all" || "$FLAVOR" == "dietpi" ]]; then
+              add_config "$NAME" "$BOARD" "$RELEASE" "$DEBIAN_VERSION" "$DISTRO_TARGET" "$HW_MODEL" "$WIFI_REQUIRED" "dietpi"
+            fi
+          done
+
+          CONFIGS+=']'
+          echo "configs=$CONFIGS" >> $GITHUB_OUTPUT
+          echo "Matrix: $CONFIGS"
+
+  # ─── Job 3 : Create draft release ────────────────────────────────────────────
+  create-release:
+    name: Create GitHub Release (draft)
+    runs-on: ubuntu-latest
+    needs: [bump-version, matrix]
+    outputs:
+      release_id: ${{ steps.create.outputs.release_id }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create draft release
+        id: create
+        env:
+          GH_TOKEN: ${{ secrets.PAT }}
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          ARMBIAN_TAG="${{ needs.matrix.outputs.armbian_tag }}"
+          FLAVOR="${{ github.event.inputs.flavor }}"
+
+          BODY="## YUMI-OS-DietPi v${VERSION}
+
+          Built on Armbian \`${ARMBIAN_TAG}\` — flavor: \`${FLAVOR}\`
+
+          ### YumiSlim
+          Lightweight DietPi-like system. Armbian + optimizations. First boot ~5 min.
+          Keeps \`armbian-config\` for WiFi and CPU governor.
+
+          ### YumiDietPi
+          Full DietPi conversion at first boot (~30-45 min). Requires internet.
+
+          ### Default credentials
+          - User: \`pi\` / Password: \`yumi\`
+          - Root password: \`yumi\`
+          - SSH enabled by default"
+
+          RELEASE_ID=$(gh api repos/${{ github.repository }}/releases \
+            --method POST \
+            --field tag_name="v${VERSION}" \
+            --field name="v${VERSION}" \
+            --field body="$BODY" \
+            --field draft=true \
+            --jq '.id')
+
+          echo "release_id=$RELEASE_ID" >> $GITHUB_OUTPUT
+          echo "Draft release created: $RELEASE_ID"
+
+  # ─── Job 4 : Build + upload images ───────────────────────────────────────────
+  build:
+    name: Build ${{ matrix.config.flavor }} — ${{ matrix.config.name }}
+    needs: [matrix, create-release]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        config: ${{ fromJson(needs.matrix.outputs.configs) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Find Armbian image asset
+        id: find-asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ needs.matrix.outputs.armbian_tag }}"
+          BOARD="${{ matrix.config.board }}"
+          RELEASE="${{ matrix.config.release }}"
+
+          ASSET=$(gh release view "$TAG" --repo Yumi-Lab/SmartPi-armbian --json assets -q \
+            ".assets[].name" | grep -i "$BOARD" | grep -i "$RELEASE" | grep -i "server" | grep -E '\.(img\.xz|img\.gz)$' | head -1)
+
+          if [[ -z "$ASSET" ]]; then
+            echo "ERROR: No matching Armbian image found for $BOARD $RELEASE"
+            gh release view "$TAG" --repo Yumi-Lab/SmartPi-armbian --json assets -q '.assets[].name'
+            exit 1
+          fi
+
+          echo "asset_name=$ASSET" >> $GITHUB_OUTPUT
+
+      - name: Download Armbian image
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "${{ needs.matrix.outputs.armbian_tag }}" \
+            --repo Yumi-Lab/SmartPi-armbian \
+            --pattern "${{ steps.find-asset.outputs.asset_name }}" \
+            --output "armbian.img.xz"
+
+      - name: Decompress image
+        run: |
+          if [[ "${{ steps.find-asset.outputs.asset_name }}" == *.img.xz ]]; then
+            xz -d armbian.img.xz
+          else
+            gunzip armbian.img.gz
+          fi
+
+      - name: Inject first-boot files
+        run: |
+          sudo bash scripts/inject-firstboot.sh \
+            armbian.img \
+            "${{ matrix.config.board }}" \
+            "${{ matrix.config.distro_target }}" \
+            --mode "${{ matrix.config.flavor }}"
+
+      - name: Name + compress + checksum
+        id: image-name
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          FLAVOR="${{ matrix.config.flavor }}"
+          BOARD="${{ matrix.config.board }}"
+          RELEASE="${{ matrix.config.release }}"
+          DEBIAN="${{ matrix.config.debian_version }}"
+
+          # Flavor label
+          if [[ "$FLAVOR" == "slim" ]]; then
+            LABEL="Slim"
+          else
+            LABEL="DietPi"
+          fi
+
+          NAME="Yumi-${BOARD}-${LABEL}-${RELEASE}-${DEBIAN}-server-${VERSION}"
+          echo "image_name=$NAME" >> $GITHUB_OUTPUT
+
+          mv armbian.img "${NAME}.img"
+          xz -T0 -6 "${NAME}.img"
+          sha256sum "${NAME}.img.xz" > "${NAME}.img.xz.sha256"
+          ls -lh "${NAME}.img.xz"
+
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.PAT }}
+        run: |
+          NAME="${{ steps.image-name.outputs.image_name }}"
+          RELEASE_ID="${{ needs.create-release.outputs.release_id }}"
+
+          gh api repos/${{ github.repository }}/releases/${RELEASE_ID}/assets \
+            --method POST \
+            --header "Content-Type: application/x-xz" \
+            -F "name=${NAME}.img.xz" \
+            --input "${NAME}.img.xz"
+
+          gh api repos/${{ github.repository }}/releases/${RELEASE_ID}/assets \
+            --method POST \
+            --header "Content-Type: text/plain" \
+            -F "name=${NAME}.img.xz.sha256" \
+            --input "${NAME}.img.xz.sha256"
+
+  # ─── Job 5 : Publish release ──────────────────────────────────────────────────
+  publish-release:
+    name: Publish Release
+    runs-on: ubuntu-latest
+    needs: [create-release, build]
+    steps:
+      - name: Publish draft release
+        env:
+          GH_TOKEN: ${{ secrets.PAT }}
+        run: |
+          RELEASE_ID="${{ needs.create-release.outputs.release_id }}"
+          gh api repos/${{ github.repository }}/releases/${RELEASE_ID} \
+            --method PATCH \
+            --field draft=false
+          echo "Release published!"
